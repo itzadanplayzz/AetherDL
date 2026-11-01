@@ -33,7 +33,7 @@ process.on('unhandledRejection', error => {
     console.error('Unhandled promise rejection:', error);
 });
 
-// deskripsi
+// Update deskripsi command agar user tahu ini support banyak platform
 const commands = [
     new SlashCommandBuilder()
         .setName('use')
