@@ -535,7 +535,13 @@ async function handleMediaMessage(message) {
         }
     }
 
-    if (sent) { try { await message.delete(); } catch (e) {} }
+    // Hapus pesan user HANYA setelah hasilnya sudah keluar & terlihat:
+    // beri jeda singkat supaya hasil (video/link) sempat tampil di layar
+    // dulu sebelum pesan perintahnya dihapus (privasi).
+    if (sent) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try { await message.delete(); } catch (e) {}
+    }
     return sent;
 }
 
