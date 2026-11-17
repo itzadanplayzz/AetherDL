@@ -106,7 +106,7 @@ async function getRemoteSize(url) {
 // <= 25MB sebagai file langsung di pesan (+ tombol download),
 // > 25MB hanya tombol link (diperpendek) buat download lewat web.
 // `send` = fungsi kirim pesan, `cleanup` = hapus pesan loading / reply.
-async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
+async function sendVideo({ captionText, videoUrl, sourceUrl, note = '', send, cleanup }) {
     const size = await getRemoteSize(videoUrl);
     const short = await shortenUrl(videoUrl);
     const row = safeLinkRow('View / Download Link', short, sourceUrl);
@@ -114,16 +114,16 @@ async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
     let ok = false;
     try {
         if (size !== null && size > MAX_ATTACH_BYTES) {
-            await send({ content: captionText, components });
+            await send({ content: captionText + note, components });
             ok = true;
         } else {
             const attachment = new AttachmentBuilder(videoUrl, { name: 'video.mp4' });
-            await send({ content: captionText, files: [attachment], components });
+            await send({ content: captionText + note, files: [attachment], components });
             ok = true;
         }
     } catch (err) {
         // Gagal kirim file (mis. ternyata di atas batas) — fallback ke link
-        try { await send({ content: captionText, components }); ok = true; } catch (e) {}
+        try { await send({ content: captionText + note, components }); ok = true; } catch (e) {}
     }
     if (cleanup) { try { await cleanup(); } catch (e) {} }
     return ok;
@@ -152,7 +152,17 @@ const commands = [
         .addStringOption(option => 
             option.setName('link')
                 .setDescription('Masukkan link media')
-                .setRequired(true)),
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('resolusi')
+                .setDescription('Pilih resolusi video (kosongkan = otomatis)')
+                .setRequired(false)
+                .addChoices(
+                    { name: '360p', value: '360' },
+                    { name: '480p', value: '480' },
+                    { name: '720p', value: '720' },
+                    { name: '1080p', value: '1080' },
+                )),
 
     new SlashCommandBuilder()
         .setName('usemp4')
@@ -160,7 +170,17 @@ const commands = [
         .addStringOption(option => 
             option.setName('link')
                 .setDescription('Masukkan link media')
-                .setRequired(true)),
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('resolusi')
+                .setDescription('Pilih resolusi video (kosongkan = otomatis)')
+                .setRequired(false)
+                .addChoices(
+                    { name: '360p', value: '360' },
+                    { name: '480p', value: '480' },
+                    { name: '720p', value: '720' },
+                    { name: '1080p', value: '1080' },
+                )),
     
     new SlashCommandBuilder()
         .setName('usemp3')
@@ -327,6 +347,44 @@ async function getMultiMedia(url, isAudioOnly = false) {
         console.error('yt-dlp error:', err.message);
     }
     return { success: false };
+}
+
+// Download video pada resolusi yang dipilih user (video+audio digabung
+// ffmpeg jadi satu file mp4). Dipakai kalau user isi opsi `resolusi` di
+// /use atau /usemp4 — format gabungan (mis. YT format 18) mentok di
+// 360p/720p, jadi resolusi lebih tinggi harus download + gabung.
+// Kembalikan { file, tempDir, size } kalau hasil <= 25MB,
+// { tooBig: true, size } kalau di atas batas, atau null kalau gagal.
+async function ytdlpGetVideoMerged(url, height) {
+    const fmt = `bv*[height<=${height}][ext=mp4]+ba[ext=m4a]/bv*[height<=${height}]+ba/b[height<=${height}][ext=mp4]/b[height<=${height}]`;
+    // 1) Cek ukuran dulu via -j (tanpa download) — jangan download video
+    // panjang yang hasilnya pasti di atas batas.
+    const estSize = await new Promise((resolve) => {
+        execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings', ...jsRuntimeArgs, '-f', fmt, '-j', '--skip-download', url], { timeout: 60000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+            if (err) return resolve(null);
+            try {
+                const d = JSON.parse(stdout);
+                const formats = d.requested_formats || [d];
+                const sum = formats.reduce((a, f) => a + (f.filesize || f.filesize_approx || 0), 0);
+                resolve(sum > 0 ? sum : null);
+            } catch (e) { resolve(null); }
+        });
+    });
+    if (estSize !== null && estSize > MAX_ATTACH_BYTES) return { tooBig: true, size: estSize };
+    // 2) Download + gabung (dibatasi 25MB — yt-dlp berhenti sendiri kalau
+    // ternyata lebih besar, jadi tidak ada download raksasa).
+    const tmpDir = path.join(__dirname, `temp_video_${Date.now()}`);
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const outPath = path.join(tmpDir, 'video.mp4');
+    const ok = await new Promise((resolve) => {
+        execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings', ...jsRuntimeArgs, '-f', fmt, '--merge-output-format', 'mp4', '--max-filesize', '25M', '-o', outPath, url], { timeout: 300000 }, (err) => {
+            resolve(!err && fs.existsSync(outPath));
+        });
+    });
+    if (!ok) { fs.rmSync(tmpDir, { recursive: true, force: true }); return null; }
+    const size = fs.statSync(outPath).size;
+    if (size > MAX_ATTACH_BYTES) { fs.rmSync(tmpDir, { recursive: true, force: true }); return { tooBig: true, size }; }
+    return { file: outPath, tempDir: tmpDir, size };
 }
 
 client.once('clientReady', async () => {
@@ -536,6 +594,39 @@ client.on('interactionCreate', async (interaction) => {
             }
         } else {
             // EKSEKUSI MULTI-MEDIA (IG, YT, DLL) — aturan sama seperti TikTok.
+            // Kalau user isi opsi `resolusi`, download + gabung di resolusi
+            // itu (TikTok tidak kena opsi ini — videonya sudah resolusi asli).
+            const resolusi = interaction.options.getString('resolusi');
+            if (resolusi) {
+                const height = parseInt(resolusi, 10);
+                const merged = await ytdlpGetVideoMerged(targetUrl, height);
+                if (merged && merged.file) {
+                    const row = safeLinkRow('View / Download Link', targetUrl);
+                    const attachment = new AttachmentBuilder(merged.file, { name: 'video.mp4' });
+                    await interaction.channel.send({ content: `${captionText}\n📹 Resolusi ${resolusi}p`, files: [attachment], components: row ? [row] : [] });
+                    await interaction.deleteReply();
+                    fs.rmSync(merged.tempDir, { recursive: true, force: true });
+                } else {
+                    // Terlalu besar / gagal gabung — fallback ke perilaku biasa.
+                    const result = await getMultiMedia(targetUrl, false);
+                    if (result.success) {
+                        const note = (merged && merged.tooBig)
+                            ? `\n⚠️ Hasil ${resolusi}p sekitar ${(merged.size / 1048576).toFixed(0)}MB (>25MB), jadi dikirim link.`
+                            : '';
+                        await sendVideo({
+                            captionText,
+                            videoUrl: result.url,
+                            sourceUrl: targetUrl,
+                            note,
+                            send: (msg) => interaction.channel.send(msg),
+                            cleanup: () => interaction.deleteReply(),
+                        });
+                    } else {
+                        await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
+                    }
+                }
+                return;
+            }
             const result = await getMultiMedia(targetUrl, false);
             if (result.success) {
                 await sendVideo({
