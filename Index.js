@@ -40,6 +40,27 @@ function safeLinkRow(label, url, fallbackUrl) {
     );
 }
 
+// Perpendek URL panjang (CDN IG/YT sering 800+ karakter) supaya bisa jadi
+// tombol download — is.gd dulu, tinyurl cadangan, kalau dua-duanya gagal
+// kembalikan null (nanti tombol pakai URL sumber).
+async function shortenUrl(longUrl) {
+    const apis = [
+        `https://is.gd/create.php?format=simple&url=${encodeURIComponent(longUrl)}`,
+        `https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`,
+    ];
+    for (const api of apis) {
+        try {
+            const res = await fetch(api, {
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                signal: AbortSignal.timeout(10000),
+            });
+            const text = (await res.text()).trim();
+            if (res.ok && /^https?:\/\/\S+$/.test(text) && text.length <= 100) return text;
+        } catch (e) {}
+    }
+    return null;
+}
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -315,15 +336,17 @@ client.on('messageCreate', async (message) => {
         } 
         
         // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Engine 2 (yt-dlp).
-        // Kirim link video langsung, JANGAN download + upload ulang filenya:
-        // download lewat proxy sandbox lambat (itu yang bikin "lama"), dan
-        // URL CDN kepanjangan buat tombol (itu yang bikin crash 50035).
+        // Pesan HANYA berisi link video aslinya (tanpa URL CDN yang panjang).
+        // Tombol "View / Download Link" = video resolusi asli (diperpendek
+        // dulu supaya muat 512 karakter) buat download lewat web, karena
+        // Discord membatasi file upload 10MB.
         else {
             const result = await getMultiMedia(targetUrl, false);
-            
+
             if (result.success) {
-                const row = safeLinkRow('View / Download Link', targetUrl);
-                await message.channel.send({ content: `${captionText}\n${result.url}`, components: row ? [row] : [] });
+                const short = await shortenUrl(result.url);
+                const row = safeLinkRow('View / Download Link', short, targetUrl);
+                await message.channel.send({ content: captionText, components: row ? [row] : [] });
                 await loadingMsg.delete();
             } else {
                 await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
@@ -423,13 +446,13 @@ client.on('interactionCreate', async (interaction) => {
                 await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
             }
         } else {
-            // EKSEKUSI MULTI-MEDIA (IG, YT, DLL) — kirim link langsung, jangan
-            // download + upload ulang (lambat lewat proxy + URL CDN kepanjangan
-            // buat tombol, bikin crash 50035).
+            // EKSEKUSI MULTI-MEDIA (IG, YT, DLL) — pesan hanya link aslinya,
+            // tombol = video resolusi asli (diperpendek) buat download web.
             const result = await getMultiMedia(targetUrl, false);
             if (result.success) {
-                const row = safeLinkRow('View / Download Link', targetUrl);
-                await interaction.channel.send({ content: `${captionText}\n${result.url}`, components: row ? [row] : [] });
+                const short = await shortenUrl(result.url);
+                const row = safeLinkRow('View / Download Link', short, targetUrl);
+                await interaction.channel.send({ content: captionText, components: row ? [row] : [] });
                 await interaction.deleteReply();
             } else {
                 await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
