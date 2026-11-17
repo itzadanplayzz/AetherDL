@@ -73,10 +73,11 @@ async function shortenUrl(longUrl) {
     return null;
 }
 
-// Batas file Discord server ini: 10MB. Video resolusi asli di bawah itu
-// langsung dikirim sebagai file ke pesan; di atas itu kirim tombol link
-// (diperpendek) buat download lewat web.
-const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+// Batas file Discord server ini: 25MB (bukan 10MB — angka 10MB sudah
+// kedaluwarsa; dibuktikan 2026-11-17 dengan upload file 11,7MB yang
+// diterima Discord). Video resolusi asli di bawah itu langsung dikirim
+// sebagai file ke pesan; di atas itu kirim tombol link buat download web.
+const MAX_ATTACH_BYTES = 25 * 1024 * 1024;
 
 // Ukuran file dari URL remote (HEAD, fallback Range) — null kalau tidak bisa.
 async function getRemoteSize(url) {
@@ -102,8 +103,8 @@ async function getRemoteSize(url) {
 }
 
 // Kirim video resolusi asli dengan aturan yang sama di semua platform:
-// <= 10MB sebagai file langsung di pesan (+ tombol download),
-// > 10MB hanya tombol link (diperpendek) buat download lewat web.
+// <= 25MB sebagai file langsung di pesan (+ tombol download),
+// > 25MB hanya tombol link (diperpendek) buat download lewat web.
 // `send` = fungsi kirim pesan, `cleanup` = hapus pesan loading / reply.
 async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
     const size = await getRemoteSize(videoUrl);
@@ -397,8 +398,8 @@ async function handleMediaMessage(message) {
     }
 
     // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Engine 2 (yt-dlp).
-    // Aturan sama seperti TikTok: resolusi asli, <= 10MB kirim file
-    // langsung ke pesan, > 10MB kirim tombol link buat download web.
+    // Aturan sama seperti TikTok: resolusi asli, <= 25MB kirim file
+    // langsung ke pesan, > 25MB kirim tombol link buat download web.
     else {
         const result = await getMultiMedia(targetUrl, false);
         if (result.success) {
