@@ -35,6 +35,12 @@ const YTDLP = (() => {
 const DENO = path.join(__dirname, 'bin', 'deno');
 const jsRuntimeArgs = fs.existsSync(DENO) ? ['--js-runtimes', `deno:${DENO}`] : [];
 
+// Situs yang boleh diproses bot (mencegah bot mendownload link web sembarangan)
+const supportedDomains = ['tiktok.com', 'instagram.com', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch', 'reddit.com', 'pinterest.com'];
+// ID pesan yang sudah diproses — cegah proses ganda (mis. pesan masuk
+// bersamaan dengan scan catch-up setelah restart).
+const handledMessageIds = new Set();
+
 // Tombol link Discord maksimal 512 karakter — URL CDN (IG scontent /
 // googlevideo) sering 800+ karakter dan bikin crash 50035 kalau dipaksa
 // jadi tombol. Pakai URL sumber (pendek) sebagai fallback, atau tanpa tombol.
@@ -104,18 +110,22 @@ async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
     const short = await shortenUrl(videoUrl);
     const row = safeLinkRow('View / Download Link', short, sourceUrl);
     const components = row ? [row] : [];
+    let ok = false;
     try {
         if (size !== null && size > MAX_ATTACH_BYTES) {
             await send({ content: captionText, components });
+            ok = true;
         } else {
             const attachment = new AttachmentBuilder(videoUrl, { name: 'video.mp4' });
             await send({ content: captionText, files: [attachment], components });
+            ok = true;
         }
     } catch (err) {
         // Gagal kirim file (mis. ternyata di atas batas) — fallback ke link
-        try { await send({ content: captionText, components }); } catch (e) {}
+        try { await send({ content: captionText, components }); ok = true; } catch (e) {}
     }
     if (cleanup) { try { await cleanup(); } catch (e) {} }
+    return ok;
 }
 
 const client = new Client({
@@ -325,90 +335,117 @@ client.once('clientReady', async () => {
         status: 'online',
     });
     await registerCommands();
+    // Link yang dikirim saat bot mati/restart tidak sampai ke messageCreate —
+    // proses yang belum terjawab (30 menit terakhir) supaya tidak hilang.
+    try { await catchUpMissedLinks(); } catch (e) { console.error('catch-up error:', e.message); }
 });
 
 // --- FITUR AUTO-DETECT LINK DARI CHAT ---
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
+// Pesan user BARU dihapus setelah hasilnya berhasil terkirim — kalau proses
+// gagal / bot crash di tengah jalan, linknya tetap ada dan bisa dicoba lagi.
+async function handleMediaMessage(message) {
+    if (message.author.bot) return false;
+    const match = message.content.match(/(https?:\/\/[^\s]+)/);
+    if (!match) return false;
+    const targetUrl = match[1];
+    if (!supportedDomains.some((domain) => targetUrl.includes(domain))) return false;
+    if (handledMessageIds.has(message.id)) return false;
+    handledMessageIds.add(message.id);
 
-    // Mendeteksi semua jenis link (bukan cuma TikTok)
-    const urlRegex = /(https?:\/\/[^\s]+)/;
-    const match = message.content.match(urlRegex);
+    const captionText = `🔗 <${targetUrl}>`;
+    const loadingMsg = await message.channel.send({ content: '⏳ Sedang memproses media... (Estimasi: 2-5 detik)' });
+    const isTikTok = targetUrl.includes('tiktok.com');
+    let sent = false;
 
-    if (match) {
-        const targetUrl = match[1];
-        
-        // Filter agar bot hanya memproses situs yang didukung (mencegah bot mendownload link web sembarangan)
-        const supportedDomains = ['tiktok.com', 'instagram.com', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch', 'reddit.com', 'pinterest.com'];
-        const isSupported = supportedDomains.some(domain => targetUrl.includes(domain));
-        
-        if (!isSupported) return;
-        
-        try { await message.delete(); } catch (err) {}
-
-        const captionText = `🔗 <${targetUrl}>`;
-        const loadingMsg = await message.channel.send({ content: '⏳ Sedang memproses media... (Estimasi: 2-5 detik)' });
-        
-        const isTikTok = targetUrl.includes('tiktok.com');
-
-        // JIKA LINK TIKTOK -> Eksekusi pakai Engine 1 (TikWM)
-        if (isTikTok) {
-            const result = await getTikTok(targetUrl);
-            if (result.success) {
-                if (!result.isVideo) {
-                    if (result.urls.length === 1) {
-                        await loadingMsg.edit({ content: '⏳ menyatukan foto & musik...' });
-                        try {
-                            const renderData = await renderSingleTikTokSlide(result.urls[0], result.audioUrl, message.id);
-                            const attachment = new AttachmentBuilder(renderData.outputPath, { name: 'slide_video.mp4' });
-
-                            await message.channel.send({ content: captionText, files: [attachment] });
-                            await loadingMsg.delete(); 
-                            fs.rmSync(renderData.tempDir, { recursive: true, force: true });
-                        } catch (renderErr) {
-                            await loadingMsg.edit({ content: `❌ Gagal merender foto menjadi video.\n${captionText}` });
-                        }
-                    } else {
-                        const attachments = result.urls.slice(0, 10).map((url, i) => 
-                            new AttachmentBuilder(url, { name: `foto_${i + 1}.jpg` })
-                        );
-                        await message.channel.send({ content: captionText, files: attachments });
-                        await loadingMsg.delete(); 
+    // JIKA LINK TIKTOK -> Eksekusi pakai Engine 1 (TikWM)
+    if (isTikTok) {
+        const result = await getTikTok(targetUrl);
+        if (result.success) {
+            if (!result.isVideo) {
+                if (result.urls.length === 1) {
+                    await loadingMsg.edit({ content: '⏳ menyatukan foto & musik...' });
+                    try {
+                        const renderData = await renderSingleTikTokSlide(result.urls[0], result.audioUrl, message.id);
+                        const attachment = new AttachmentBuilder(renderData.outputPath, { name: 'slide_video.mp4' });
+                        await message.channel.send({ content: captionText, files: [attachment] });
+                        await loadingMsg.delete();
+                        fs.rmSync(renderData.tempDir, { recursive: true, force: true });
+                        sent = true;
+                    } catch (renderErr) {
+                        await loadingMsg.edit({ content: `❌ Gagal merender foto menjadi video.\n${captionText}` });
                     }
                 } else {
-                    await sendVideo({
-                        captionText,
-                        videoUrl: result.url,
-                        sourceUrl: targetUrl,
-                        send: (msg) => message.channel.send(msg),
-                        cleanup: () => loadingMsg.delete(),
-                    });
+                    const attachments = result.urls.slice(0, 10).map((url, i) =>
+                        new AttachmentBuilder(url, { name: `foto_${i + 1}.jpg` })
+                    );
+                    await message.channel.send({ content: captionText, files: attachments });
+                    await loadingMsg.delete();
+                    sent = true;
                 }
             } else {
-                await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
-            }
-        } 
-        
-        // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Engine 2 (yt-dlp).
-        // Aturan sama seperti TikTok: resolusi asli, <= 10MB kirim file
-        // langsung ke pesan, > 10MB kirim tombol link buat download web.
-        else {
-            const result = await getMultiMedia(targetUrl, false);
-
-            if (result.success) {
-                await sendVideo({
+                sent = await sendVideo({
                     captionText,
                     videoUrl: result.url,
                     sourceUrl: targetUrl,
                     send: (msg) => message.channel.send(msg),
                     cleanup: () => loadingMsg.delete(),
                 });
-            } else {
-                await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
+            }
+        } else {
+            await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
+        }
+    }
+
+    // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Engine 2 (yt-dlp).
+    // Aturan sama seperti TikTok: resolusi asli, <= 10MB kirim file
+    // langsung ke pesan, > 10MB kirim tombol link buat download web.
+    else {
+        const result = await getMultiMedia(targetUrl, false);
+        if (result.success) {
+            sent = await sendVideo({
+                captionText,
+                videoUrl: result.url,
+                sourceUrl: targetUrl,
+                send: (msg) => message.channel.send(msg),
+                cleanup: () => loadingMsg.delete(),
+            });
+        } else {
+            await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
+        }
+    }
+
+    if (sent) { try { await message.delete(); } catch (e) {} }
+    return sent;
+}
+
+client.on('messageCreate', (message) => {
+    handleMediaMessage(message).catch((e) => console.error('handleMediaMessage error:', e.message));
+});
+
+// Link yang terlewat saat bot mati/restart: proses yang belum terjawab
+// (30 menit terakhir) supaya tidak hilang begitu saja.
+async function catchUpMissedLinks() {
+    const cutoff = Date.now() - 30 * 60 * 1000;
+    for (const guild of client.guilds.cache.values()) {
+        const channels = guild.channels.cache.filter((c) => c.isTextBased() && c.viewable);
+        for (const channel of channels.values()) {
+            let messages;
+            try { messages = await channel.messages.fetch({ limit: 5 }); } catch (e) { continue; }
+            const sorted = [...messages.values()].sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+            for (const msg of sorted) {
+                if (msg.author.bot || msg.createdTimestamp < cutoff) continue;
+                if (handledMessageIds.has(msg.id)) continue;
+                const match = msg.content.match(/(https?:\/\/[^\s]+)/);
+                if (!match) continue;
+                const targetUrl = match[1];
+                if (!supportedDomains.some((d) => targetUrl.includes(d))) continue;
+                const answered = sorted.some((m) => m.author.id === client.user.id && m.createdTimestamp > msg.createdTimestamp && m.content.includes(targetUrl));
+                if (answered) continue;
+                try { await handleMediaMessage(msg); } catch (e) { console.error('catch-up error:', e.message); }
             }
         }
     }
-});
+}
 
 // --- FITUR SLASH COMMANDS ---
 client.on('interactionCreate', async (interaction) => {
@@ -419,7 +456,6 @@ client.on('interactionCreate', async (interaction) => {
     const captionText = `<${targetUrl}>`;
 
     // Hilangkan batasan TikTok only agar user bisa naruh link IG, YT, X
-    const supportedDomains = ['tiktok.com', 'instagram.com', 'youtube.com', 'youtu.be', 'twitter.com', 'x.com', 'facebook.com', 'fb.watch', 'reddit.com', 'pinterest.com'];
     const isSupported = supportedDomains.some(domain => targetUrl.includes(domain));
 
     if (!isSupported) {
