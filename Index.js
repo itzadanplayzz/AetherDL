@@ -143,6 +143,35 @@ process.on('unhandledRejection', error => {
 
 // Jangan sampai error client (mis. gagal kirim pesan) mematikan proses
 client.on('error', (err) => console.error('Client error:', err.message));
+client.on('shardError', (err) => console.error('Shard error:', err.message));
+client.on('shardDisconnect', (event, shardId) => console.log(`Shard ${shardId} disconnect (code ${event.code}), discord.js akan reconnect otomatis.`));
+
+// Bot crash berulang karena WebSocket gateway Discord timeout saat handshake
+// (lewat proxy sandbox) — error 'error' di ws tidak tertangkap discord.js dan
+// mematikan proses (sudah 3x: 14:36, 16:36, ~18:13 WIB 2026-11-17, user dapat
+// "The application did not respond"). Tangkap di level proses: kalau error
+// WebSocket, coba reconnect gateway (destroy + login ulang); kalau error lain,
+// keluar supaya keepalive restart.
+let wsReconnecting = false;
+process.on('uncaughtException', (err) => {
+    const msg = String((err && err.message) || err);
+    console.error('uncaughtException:', msg);
+    const isWs = /websocket|handshake|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up/i.test(msg);
+    if (!isWs || wsReconnecting) { process.exit(1); return; }
+    wsReconnecting = true;
+    console.log('WebSocket gateway error — mencoba reconnect dalam 5 detik...');
+    setTimeout(async () => {
+        try { await client.destroy(); } catch (e) {}
+        try {
+            await client.login(BOT_TOKEN);
+            wsReconnecting = false;
+            console.log('Reconnect gateway berhasil.');
+        } catch (e) {
+            console.error('Reconnect gateway gagal:', e.message);
+            process.exit(1);
+        }
+    }, 5000);
+});
 
 // Update deskripsi command agar user tahu ini support banyak platform
 const commands = [
