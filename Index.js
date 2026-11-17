@@ -106,7 +106,7 @@ async function getRemoteSize(url) {
 // <= 25MB sebagai file langsung di pesan (+ tombol download),
 // > 25MB hanya tombol link (diperpendek) buat download lewat web.
 // `send` = fungsi kirim pesan, `cleanup` = hapus pesan loading / reply.
-async function sendVideo({ captionText, videoUrl, sourceUrl, note = '', send, cleanup }) {
+async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
     const size = await getRemoteSize(videoUrl);
     const short = await shortenUrl(videoUrl);
     const row = safeLinkRow('View / Download Link', short, sourceUrl);
@@ -114,16 +114,16 @@ async function sendVideo({ captionText, videoUrl, sourceUrl, note = '', send, cl
     let ok = false;
     try {
         if (size !== null && size > MAX_ATTACH_BYTES) {
-            await send({ content: captionText + note, components });
+            await send({ content: captionText, components });
             ok = true;
         } else {
             const attachment = new AttachmentBuilder(videoUrl, { name: 'video.mp4' });
-            await send({ content: captionText + note, files: [attachment], components });
+            await send({ content: captionText, files: [attachment], components });
             ok = true;
         }
     } catch (err) {
         // Gagal kirim file (mis. ternyata di atas batas) — fallback ke link
-        try { await send({ content: captionText + note, components }); ok = true; } catch (e) {}
+        try { await send({ content: captionText, components }); ok = true; } catch (e) {}
     }
     if (cleanup) { try { await cleanup(); } catch (e) {} }
     return ok;
@@ -353,10 +353,12 @@ async function getMultiMedia(url, isAudioOnly = false) {
 // ffmpeg jadi satu file mp4). Dipakai kalau user isi opsi `resolusi` di
 // /use atau /usemp4 — format gabungan (mis. YT format 18) mentok di
 // 360p/720p, jadi resolusi lebih tinggi harus download + gabung.
-// Kembalikan { file, tempDir, size } kalau hasil <= 25MB,
+// `maxBytes` = batas ukuran hasil (default 25MB = batas attach Discord).
+// Kembalikan { file, tempDir, size } kalau hasil <= maxBytes,
 // { tooBig: true, size } kalau di atas batas, atau null kalau gagal.
-async function ytdlpGetVideoMerged(url, height) {
+async function ytdlpGetVideoMerged(url, height, maxBytes = MAX_ATTACH_BYTES) {
     const fmt = `bv*[height<=${height}][ext=mp4]+ba[ext=m4a]/bv*[height<=${height}]+ba/b[height<=${height}][ext=mp4]/b[height<=${height}]`;
+    const maxMB = Math.floor(maxBytes / 1048576);
     // 1) Cek ukuran dulu via -j (tanpa download) — jangan download video
     // panjang yang hasilnya pasti di atas batas.
     const estSize = await new Promise((resolve) => {
@@ -370,21 +372,51 @@ async function ytdlpGetVideoMerged(url, height) {
             } catch (e) { resolve(null); }
         });
     });
-    if (estSize !== null && estSize > MAX_ATTACH_BYTES) return { tooBig: true, size: estSize };
-    // 2) Download + gabung (dibatasi 25MB — yt-dlp berhenti sendiri kalau
+    if (estSize !== null && estSize > maxBytes) return { tooBig: true, size: estSize };
+    // 2) Download + gabung (dibatasi maxBytes — yt-dlp berhenti sendiri kalau
     // ternyata lebih besar, jadi tidak ada download raksasa).
     const tmpDir = path.join(__dirname, `temp_video_${Date.now()}`);
     fs.mkdirSync(tmpDir, { recursive: true });
     const outPath = path.join(tmpDir, 'video.mp4');
     const ok = await new Promise((resolve) => {
-        execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings', ...jsRuntimeArgs, '-f', fmt, '--merge-output-format', 'mp4', '--max-filesize', '25M', '-o', outPath, url], { timeout: 300000 }, (err) => {
+        execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings', ...jsRuntimeArgs, '-f', fmt, '--merge-output-format', 'mp4', '--max-filesize', `${maxMB}M`, '-o', outPath, url], { timeout: maxBytes > MAX_ATTACH_BYTES ? 600000 : 300000 }, (err) => {
             resolve(!err && fs.existsSync(outPath));
         });
     });
     if (!ok) { fs.rmSync(tmpDir, { recursive: true, force: true }); return null; }
     const size = fs.statSync(outPath).size;
-    if (size > MAX_ATTACH_BYTES) { fs.rmSync(tmpDir, { recursive: true, force: true }); return { tooBig: true, size }; }
+    if (size > maxBytes) { fs.rmSync(tmpDir, { recursive: true, force: true }); return { tooBig: true, size }; }
     return { file: outPath, tempDir: tmpDir, size };
+}
+
+// Batas file hosting (Gofile gratis ~10GB, tapi download+upload video
+// raksasa lewat proxy lambat — batasi 512MB supaya tetap selesai).
+const HOST_MAX_BYTES = 512 * 1024 * 1024;
+
+// Upload file ke Gofile (gratis, tanpa API key). Return URL halaman
+// download (https://gofile.io/d/xxxx), atau null kalau gagal.
+// Dipakai kalau hasil merge resolusi pilihan user di atas batas Discord.
+async function uploadToHost(filePath) {
+    try {
+        if (fs.statSync(filePath).size > HOST_MAX_BYTES) return null;
+        const server = await new Promise((resolve) => {
+            execFile('curl', ['-s', '--max-time', '30', 'https://api.gofile.io/servers'], (err, stdout) => {
+                if (err) return resolve(null);
+                try { resolve(JSON.parse(stdout).data.servers[0].name); } catch (e) { resolve(null); }
+            });
+        });
+        if (!server) return null;
+        const url = await new Promise((resolve) => {
+            execFile('curl', ['-s', '--max-time', '600', '-F', `file=@${filePath}`, `https://${server}.gofile.io/uploadFile`], (err, stdout) => {
+                if (err) return resolve(null);
+                try {
+                    const d = JSON.parse(stdout);
+                    resolve(d.status === 'ok' && d.data && d.data.downloadPage ? d.data.downloadPage : null);
+                } catch (e) { resolve(null); }
+            });
+        });
+        return url;
+    } catch (e) { return null; }
 }
 
 client.once('clientReady', async () => {
@@ -607,22 +639,35 @@ client.on('interactionCreate', async (interaction) => {
                     await interaction.deleteReply();
                     fs.rmSync(merged.tempDir, { recursive: true, force: true });
                 } else {
-                    // Terlalu besar / gagal gabung — fallback ke perilaku biasa.
-                    const result = await getMultiMedia(targetUrl, false);
-                    if (result.success) {
-                        const note = (merged && merged.tooBig)
-                            ? `\n⚠️ Hasil ${resolusi}p sekitar ${(merged.size / 1048576).toFixed(0)}MB (>25MB), jadi dikirim link.`
-                            : '';
-                        await sendVideo({
-                            captionText,
-                            videoUrl: result.url,
-                            sourceUrl: targetUrl,
-                            note,
-                            send: (msg) => interaction.channel.send(msg),
-                            cleanup: () => interaction.deleteReply(),
-                        });
+                    // Terlalu besar buat Discord (>25MB) atau ukuran tidak
+                    // diketahui — download + gabung, upload ke file hosting
+                    // (Gofile), kirim link HD sebagai pesan baru.
+                    try { await interaction.editReply({ content: `⏳ Download ${resolusi}p & upload ke file hosting...` }); } catch (e) {}
+                    const hosted = await ytdlpGetVideoMerged(targetUrl, height, HOST_MAX_BYTES);
+                    let hostUrl = null;
+                    if (hosted && hosted.file) {
+                        hostUrl = await uploadToHost(hosted.file);
+                        fs.rmSync(hosted.tempDir, { recursive: true, force: true });
+                    }
+                    if (hostUrl) {
+                        const row = safeLinkRow('View / Download Link', hostUrl, targetUrl);
+                        const sizeMB = (hosted.size / 1048576).toFixed(0);
+                        await interaction.channel.send({ content: `${captionText}\n📹 Resolusi ${resolusi}p • ${sizeMB}MB\n⬇️ Download HD: ${hostUrl}`, components: row ? [row] : [] });
+                        try { await interaction.deleteReply(); } catch (e) {}
                     } else {
-                        await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
+                        // Upload gagal / hasil di atas batas host — fallback ke link biasa.
+                        const result = await getMultiMedia(targetUrl, false);
+                        if (result.success) {
+                            await sendVideo({
+                                captionText,
+                                videoUrl: result.url,
+                                sourceUrl: targetUrl,
+                                send: (msg) => interaction.channel.send(msg),
+                                cleanup: () => interaction.deleteReply(),
+                            });
+                        } else {
+                            await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
+                        }
                     }
                 }
                 return;
