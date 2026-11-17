@@ -432,8 +432,10 @@ client.once('clientReady', async () => {
 });
 
 // --- FITUR AUTO-DETECT LINK DARI CHAT ---
-// Pesan user BARU dihapus setelah hasilnya berhasil terkirim — kalau proses
-// gagal / bot crash di tengah jalan, linknya tetap ada dan bisa dicoba lagi.
+// Pesan user SENGAJA tidak dihapus — kalau dihapus, balasan-balasan bot jadi
+// berurutan tanpa jeda dan Discord menggabungkannya jadi satu grup ("nyambung"),
+// bukan pesan baru terpisah. Dengan pesan user tetap ada, tiap balasan bot
+// muncul sebagai pesan baru (ada nama + avatar botnya).
 async function handleMediaMessage(message) {
     if (message.author.bot) return false;
     const match = message.content.match(/(https?:\/\/[^\s]+)/);
@@ -505,7 +507,6 @@ async function handleMediaMessage(message) {
         }
     }
 
-    if (sent) { try { await message.delete(); } catch (e) {} }
     return sent;
 }
 
