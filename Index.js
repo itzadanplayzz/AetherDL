@@ -223,6 +223,18 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
 
 async function registerCommands() {
+    // Bersihkan command GLOBAL yang sudah usang (dulu /use & /usemp3
+    // sempat terdaftar global dengan deskripsi lama TikTok-only).
+    // Kalau tidak dihapus, Discord menampilkan /use dobel di autocomplete:
+    // satu yang global (lama) + satu yang guild (baru). Bot ini hanya
+    // pakai command guild, jadi global boleh dikosongkan.
+    try {
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+        console.log('🧹 Command global usang dibersihkan (biar /use tidak dobel).');
+    } catch (error) {
+        console.error('❌ Gagal bersihkan command global:', error.code || error.message);
+    }
+
     // Daftar ke SEMUA server tempat bot berada (bukan 1 ID hardcode) —
     // dulu hardcode ke guild 1382229810335453206 tempat bot tidak ada,
     // makanya selalu 50001 Missing Access.
@@ -461,9 +473,10 @@ client.once('clientReady', async () => {
 });
 
 // --- FITUR AUTO-DETECT LINK DARI CHAT ---
-// Pesan user BARU dihapus setelah hasilnya berhasil terkirim — kalau proses
-// gagal / bot crash di tengah jalan, linknya tetap ada dan bisa dicoba lagi.
-// (Dihapus juga supaya tidak kelihatan siapa yang minta — privasi user.)
+// Pesan user dihapus LANGSUNG begitu link terbaca (privasi — sebelum orang
+// lain sempat lihat siapa yang kirim). Selama proses, bot cukup menampilkan
+// indikator "typing" (seperti "thinking" di slash command), tanpa pesan
+// loading publik yang nyangkut di channel.
 async function handleMediaMessage(message) {
     if (message.author.bot) return false;
     const match = message.content.match(/(https?:\/\/[^\s]+)/);
@@ -480,7 +493,12 @@ async function handleMediaMessage(message) {
     try { await message.delete(); } catch (e) {}
 
     const captionText = `🔗 <${targetUrl}>`;
-    const loadingMsg = await message.channel.send({ content: '⏳ Sedang memproses media... (Estimasi: 2-5 detik)' });
+    // Indikator "typing" (seperti "thinking" di slash command) — bukan
+    // pesan loading publik. Typing Discord cuma tahan ~10 detik, jadi
+    // diulang tiap 8 detik sampai proses selesai.
+    const typingTimer = setInterval(() => { message.channel.sendTyping().catch(() => {}); }, 8000);
+    message.channel.sendTyping().catch(() => {});
+    const stopTyping = () => clearInterval(typingTimer);
     const isTikTok = targetUrl.includes('tiktok.com');
     let sent = false;
 
@@ -490,23 +508,23 @@ async function handleMediaMessage(message) {
         if (result.success) {
             if (!result.isVideo) {
                 if (result.urls.length === 1) {
-                    await loadingMsg.edit({ content: '⏳ menyatukan foto & musik...' });
                     try {
                         const renderData = await renderSingleTikTokSlide(result.urls[0], result.audioUrl, message.id);
                         const attachment = new AttachmentBuilder(renderData.outputPath, { name: 'slide_video.mp4' });
                         await message.channel.send({ content: captionText, files: [attachment] });
-                        await loadingMsg.delete();
+                        stopTyping();
                         fs.rmSync(renderData.tempDir, { recursive: true, force: true });
                         sent = true;
                     } catch (renderErr) {
-                        await loadingMsg.edit({ content: `❌ Gagal merender foto menjadi video.\n${captionText}` });
+                        stopTyping();
+                        await message.channel.send({ content: `❌ Gagal merender foto menjadi video.\n${captionText}` });
                     }
                 } else {
                     const attachments = result.urls.slice(0, 10).map((url, i) =>
                         new AttachmentBuilder(url, { name: `foto_${i + 1}.jpg` })
                     );
                     await message.channel.send({ content: captionText, files: attachments });
-                    await loadingMsg.delete();
+                    stopTyping();
                     sent = true;
                 }
             } else {
@@ -515,11 +533,12 @@ async function handleMediaMessage(message) {
                     videoUrl: result.url,
                     sourceUrl: targetUrl,
                     send: (msg) => message.channel.send(msg),
-                    cleanup: () => loadingMsg.delete(),
+                    cleanup: stopTyping,
                 });
             }
         } else {
-            await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
+            stopTyping();
+            await message.channel.send({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
         }
     }
 
@@ -534,15 +553,17 @@ async function handleMediaMessage(message) {
                 videoUrl: result.url,
                 sourceUrl: targetUrl,
                 send: (msg) => message.channel.send(msg),
-                cleanup: () => loadingMsg.delete(),
+                cleanup: stopTyping,
             });
         } else {
-            await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
+            stopTyping();
+            await message.channel.send({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
         }
     }
 
-    // Pesan user sudah dihapus di awal (begitu link terbaca), jadi di sini
-    // tidak ada lagi yang perlu dihapus.
+    // Pengaman: pastikan indikator typing berhenti walau ada jalur yang
+    // kelewat. Pesan user sudah dihapus di awal (begitu link terbaca).
+    stopTyping();
     return sent;
 }
 
