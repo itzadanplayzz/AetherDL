@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "axios": "^1.21.1",
+    "discord.js": "^14.28.1"
+  },
+  "description": "Discord bot multi-downloader (TikTok, IG, YT, X, FB, dll) \u2014 yt-dlp + TikWM + ffmpeg",
+  "main": "Index.js",
+  "name": "bot-tiktok-discord",
+  "scripts": {
+    "start": "node Index.js"
+  },
+  "version": "1.0.0"
+}

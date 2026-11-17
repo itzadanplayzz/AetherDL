@@ -15,11 +15,19 @@ const {
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 
-const BOT_TOKEN = '';
+const BOT_TOKEN = process.env.BOT_TOKEN || process.env.DISCORD_TOKEN || process.env.TOKEN || '';
 const CLIENT_ID = '1555997672094302278';
-const GUILD_ID = '1382229810335453206';
+
+// yt-dlp lokal (bin/yt-dlp), fallback ke yang ada di PATH
+const YTDLP = (() => {
+    const local = path.join(__dirname, 'bin', 'yt-dlp');
+    const localExe = path.join(__dirname, 'bin', 'yt-dlp.exe');
+    if (fs.existsSync(local)) return local;
+    if (fs.existsSync(localExe)) return localExe;
+    return 'yt-dlp';
+})();
 
 const client = new Client({
     intents: [
@@ -63,15 +71,24 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
 
 async function registerCommands() {
-    try {
-        console.log('⏳ Mendaftarkan Slash Commands ke Server ID: ' + GUILD_ID + '...');
-        await rest.put(
-            Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-            { body: commands }
-        );
-        console.log('✅ Instant Guild Slash Commands berhasil terdaftar!');
-    } catch (error) {
-        console.error('❌ Error mendaftarkan Guild Slash Commands:', error);
+    // Daftar ke SEMUA server tempat bot berada (bukan 1 ID hardcode) —
+    // dulu hardcode ke guild 1382229810335453206 tempat bot tidak ada,
+    // makanya selalu 50001 Missing Access.
+    const guilds = [...client.guilds.cache.values()];
+    if (guilds.length === 0) {
+        console.log('⚠️ Bot belum ada di server manapun, slash command tidak didaftarkan.');
+        return;
+    }
+    for (const guild of guilds) {
+        try {
+            await rest.put(
+                Routes.applicationGuildCommands(CLIENT_ID, guild.id),
+                { body: commands }
+            );
+            console.log(`✅ Slash Commands terdaftar di server: ${guild.name} (${guild.id})`);
+        } catch (error) {
+            console.error(`❌ Gagal daftar slash command di ${guild.name} (${guild.id}):`, error.code || error.message);
+        }
     }
 }
 
@@ -161,33 +178,50 @@ async function getAudio(url) {
     return { success: false };
 }
 
-// --- ENGINE 2: MULTI-DOWNLOADER 20+ SITUS (COBALT API) ---
+// --- ENGINE 2: MULTI-DOWNLOADER 20+ SITUS (yt-dlp) ---
+// Cobalt API (api.cobalt.tools/api/json) sudah mati — sekarang mengembalikan
+// "Cannot POST /api/json", jadi semua download non-TikTok gagal. Diganti yt-dlp
+// (sudah dites di VM ini: IG, YT jalan; pakai --no-check-certificate karena
+// proxy sandbox mem-MITM TLS).
+function ytdlpGetUrl(url) {
+    return new Promise((resolve) => {
+        execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings',
+            '-f', 'best[ext=mp4]/best', '--get-url', url],
+            { timeout: 60000, maxBuffer: 1024 * 1024 },
+            (err, stdout) => {
+                if (err) return resolve(null);
+                const line = stdout.trim().split('\n').filter(Boolean)[0];
+                resolve(line || null);
+            });
+    });
+}
+
+function ytdlpGetAudio(url, outPath) {
+    return new Promise((resolve) => {
+        execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings',
+            '-f', 'bestaudio', '-x', '--audio-format', 'mp3', '-o', outPath, url],
+            { timeout: 120000 },
+            (err) => {
+                resolve(!err && fs.existsSync(outPath));
+            });
+    });
+}
+
 async function getMultiMedia(url, isAudioOnly = false) {
     try {
-        const response = await fetch('https://api.cobalt.tools/api/json', {
-            method: 'POST',
-            headers: {
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-            },
-            body: JSON.stringify({
-                url: url,
-                isAudioOnly: isAudioOnly,
-                aFormat: 'mp3',
-                vQuality: '720' // Set kualitas video default HD
-            })
-        });
-        
-        const data = await response.json();
-        
-        // Menangani url video tunggal atau url picker (seperti carousel IG)
-        if (data && (data.url || data.picker)) {
-            const finalUrl = data.url || data.picker[0]?.url;
-            return { success: true, url: finalUrl };
+        if (isAudioOnly) {
+            const tmpDir = path.join(__dirname, `temp_audio_${Date.now()}`);
+            fs.mkdirSync(tmpDir, { recursive: true });
+            const outPath = path.join(tmpDir, 'audio.mp3');
+            const ok = await ytdlpGetAudio(url, outPath);
+            if (ok) return { success: true, file: outPath, tempDir: tmpDir };
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+            return { success: false };
         }
+        const mediaUrl = await ytdlpGetUrl(url);
+        if (mediaUrl) return { success: true, url: mediaUrl };
     } catch (err) {
-        console.error('Cobalt API error:', err);
+        console.error('yt-dlp error:', err.message);
     }
     return { success: false };
 }
@@ -314,19 +348,29 @@ client.on('interactionCreate', async (interaction) => {
         const result = isTikTok ? await getAudio(targetUrl) : await getMultiMedia(targetUrl, true);
 
         if (result.success) {
+            const dlUrl = result.url || targetUrl;
             const viewBtn = new ButtonBuilder()
                 .setLabel('View / Download MP3')
                 .setStyle(ButtonStyle.Link)
-                .setURL(result.url);
+                .setURL(dlUrl);
             const row = new ActionRowBuilder().addComponents(viewBtn);
 
             try {
-                const attachment = new AttachmentBuilder(result.url, { name: `${isTikTok ? (result.title || 'audio') : 'audio'}.mp3` });
-                await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
-                await interaction.deleteReply();
+                if (result.file) {
+                    // Audio dari yt-dlp: file mp3 lokal, hapus folder temp sesudah kirim
+                    const attachment = new AttachmentBuilder(result.file, { name: 'audio.mp3' });
+                    await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
+                    await interaction.deleteReply();
+                    if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
+                } else {
+                    const attachment = new AttachmentBuilder(result.url, { name: `${isTikTok ? (result.title || 'audio') : 'audio'}.mp3` });
+                    await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
+                    await interaction.deleteReply();
+                }
             } catch (err) {
                 await interaction.channel.send({ content: captionText, components: [row] });
                 await interaction.deleteReply();
+                if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
             }
         } else {
             await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
