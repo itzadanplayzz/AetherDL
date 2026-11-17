@@ -29,6 +29,17 @@ const YTDLP = (() => {
     return 'yt-dlp';
 })();
 
+// Tombol link Discord maksimal 512 karakter — URL CDN (IG scontent /
+// googlevideo) sering 800+ karakter dan bikin crash 50035 kalau dipaksa
+// jadi tombol. Pakai URL sumber (pendek) sebagai fallback, atau tanpa tombol.
+function safeLinkRow(label, url, fallbackUrl) {
+    const pick = [url, fallbackUrl].find((u) => typeof u === 'string' && u.length > 0 && u.length <= 512);
+    if (!pick) return null;
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setLabel(label).setStyle(ButtonStyle.Link).setURL(pick)
+    );
+}
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -40,6 +51,9 @@ const client = new Client({
 process.on('unhandledRejection', error => {
     console.error('Unhandled promise rejection:', error);
 });
+
+// Jangan sampai error client (mis. gagal kirim pesan) mematikan proses
+client.on('error', (err) => console.error('Client error:', err.message));
 
 // Update deskripsi command agar user tahu ini support banyak platform
 const commands = [
@@ -284,15 +298,14 @@ client.on('messageCreate', async (message) => {
                         await loadingMsg.delete(); 
                     }
                 } else {
-                    const viewBtn = new ButtonBuilder().setLabel('View / Download Link').setStyle(ButtonStyle.Link).setURL(result.url);
-                    const row = new ActionRowBuilder().addComponents(viewBtn);
+                    const row = safeLinkRow('View / Download Link', result.url, targetUrl);
 
                     try {
                         const attachment = new AttachmentBuilder(result.url, { name: 'video.mp4' });
-                        await message.channel.send({ content: captionText, files: [attachment], components: [row] });
+                        await message.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
                         await loadingMsg.delete(); 
                     } catch (err) {
-                        await message.channel.send({ content: captionText, components: [row] });
+                        await message.channel.send({ content: captionText });
                         await loadingMsg.delete(); 
                     }
                 }
@@ -301,22 +314,17 @@ client.on('messageCreate', async (message) => {
             }
         } 
         
-        // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Eksekusi pakai Engine 2 (Cobalt)
+        // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Engine 2 (yt-dlp).
+        // Kirim link video langsung, JANGAN download + upload ulang filenya:
+        // download lewat proxy sandbox lambat (itu yang bikin "lama"), dan
+        // URL CDN kepanjangan buat tombol (itu yang bikin crash 50035).
         else {
             const result = await getMultiMedia(targetUrl, false);
             
             if (result.success) {
-                const viewBtn = new ButtonBuilder().setLabel('View / Download Link').setStyle(ButtonStyle.Link).setURL(result.url);
-                const row = new ActionRowBuilder().addComponents(viewBtn);
-
-                try {
-                    const attachment = new AttachmentBuilder(result.url, { name: 'video.mp4' });
-                    await message.channel.send({ content: captionText, files: [attachment], components: [row] });
-                    await loadingMsg.delete(); 
-                } catch (err) {
-                    await message.channel.send({ content: captionText, components: [row] });
-                    await loadingMsg.delete(); 
-                }
+                const row = safeLinkRow('View / Download Link', targetUrl);
+                await message.channel.send({ content: `${captionText}\n${result.url}`, components: row ? [row] : [] });
+                await loadingMsg.delete();
             } else {
                 await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
             }
@@ -349,26 +357,22 @@ client.on('interactionCreate', async (interaction) => {
 
         if (result.success) {
             const dlUrl = result.url || targetUrl;
-            const viewBtn = new ButtonBuilder()
-                .setLabel('View / Download MP3')
-                .setStyle(ButtonStyle.Link)
-                .setURL(dlUrl);
-            const row = new ActionRowBuilder().addComponents(viewBtn);
+            const row = safeLinkRow('View / Download MP3', dlUrl, targetUrl);
 
             try {
                 if (result.file) {
                     // Audio dari yt-dlp: file mp3 lokal, hapus folder temp sesudah kirim
                     const attachment = new AttachmentBuilder(result.file, { name: 'audio.mp3' });
-                    await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
+                    await interaction.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
                     await interaction.deleteReply();
                     if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
                 } else {
                     const attachment = new AttachmentBuilder(result.url, { name: `${isTikTok ? (result.title || 'audio') : 'audio'}.mp3` });
-                    await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
+                    await interaction.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
                     await interaction.deleteReply();
                 }
             } catch (err) {
-                await interaction.channel.send({ content: captionText, components: [row] });
+                await interaction.channel.send({ content: captionText });
                 await interaction.deleteReply();
                 if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
             }
@@ -404,15 +408,14 @@ client.on('interactionCreate', async (interaction) => {
                         await interaction.deleteReply();
                     }
                 } else {
-                    const viewBtn = new ButtonBuilder().setLabel('View / Download Link').setStyle(ButtonStyle.Link).setURL(result.url);
-                    const row = new ActionRowBuilder().addComponents(viewBtn);
+                    const row = safeLinkRow('View / Download Link', result.url, targetUrl);
 
                     try {
                         const attachment = new AttachmentBuilder(result.url, { name: 'video.mp4' });
-                        await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
+                        await interaction.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
                         await interaction.deleteReply();
                     } catch (err) {
-                        await interaction.channel.send({ content: captionText, components: [row] });
+                        await interaction.channel.send({ content: captionText });
                         await interaction.deleteReply();
                     }
                 }
@@ -420,20 +423,14 @@ client.on('interactionCreate', async (interaction) => {
                 await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
             }
         } else {
-            // EKSEKUSI MULTI-MEDIA (IG, YT, DLL)
+            // EKSEKUSI MULTI-MEDIA (IG, YT, DLL) — kirim link langsung, jangan
+            // download + upload ulang (lambat lewat proxy + URL CDN kepanjangan
+            // buat tombol, bikin crash 50035).
             const result = await getMultiMedia(targetUrl, false);
             if (result.success) {
-                const viewBtn = new ButtonBuilder().setLabel('View / Download Link').setStyle(ButtonStyle.Link).setURL(result.url);
-                const row = new ActionRowBuilder().addComponents(viewBtn);
-
-                try {
-                    const attachment = new AttachmentBuilder(result.url, { name: 'video.mp4' });
-                    await interaction.channel.send({ content: captionText, files: [attachment], components: [row] });
-                    await interaction.deleteReply();
-                } catch (err) {
-                    await interaction.channel.send({ content: captionText, components: [row] });
-                    await interaction.deleteReply();
-                }
+                const row = safeLinkRow('View / Download Link', targetUrl);
+                await interaction.channel.send({ content: `${captionText}\n${result.url}`, components: row ? [row] : [] });
+                await interaction.deleteReply();
             } else {
                 await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
             }
