@@ -242,7 +242,11 @@ const commands = [
         .addStringOption(option => 
             option.setName('link')
                 .setDescription('Masukkan link media')
-                .setRequired(true))
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('help')
+        .setDescription('Panduan cara pakai AetherDL'),
 ].map(command => command.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -517,7 +521,7 @@ async function handleMediaMessage(message) {
     // error bot supaya bisa dicoba lagi.
     try { await message.delete(); } catch (e) {}
 
-    const captionText = `🔗 <${targetUrl}>`;
+    const captionText = `<${targetUrl}>`;
     // Indikator "typing" (seperti "thinking" di slash command) — bukan
     // pesan loading publik. Typing Discord cuma tahan ~10 detik, jadi
     // diulang tiap 8 detik sampai proses selesai.
@@ -626,6 +630,41 @@ client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
+
+    // HANDLER /help — panduan cara pakai (tanpa link, jadi ditangani
+    // sebelum validasi link di bawah). Dikirim ephemeral (cuma yang
+    // manggil yang lihat) supaya tidak spam channel.
+    if (commandName === 'help') {
+        const helpEmbed = {
+            title: 'AetherDL — Panduan',
+            description: 'Bot download video dari TikTok, Instagram, YouTube, X, Facebook, Reddit, dan Pinterest.',
+            color: 0x5865F2,
+            fields: [
+                {
+                    name: 'Cara pakai',
+                    value: '**1. Paste link langsung di chat** — bot otomatis proses. Pesan link kamu langsung dihapus begitu dibaca (privasi, biar tidak kelihatan siapa yang minta).\n**2. Pakai slash command:** `/use <link>`, `/usemp4 <link>`, atau `/usemp3 <link>`.',
+                },
+                {
+                    name: 'Perintah',
+                    value: '`/use <link>` — Download video (bisa pilih resolusi)\n`/usemp4 <link>` — Download video sebagai MP4 (bisa pilih resolusi)\n`/usemp3 <link>` — Download audio sebagai MP3\n`/help` — Panduan ini',
+                },
+                {
+                    name: 'Resolusi',
+                    value: '`/use` dan `/usemp4` punya opsi `resolusi` (360p / 480p / 720p / 1080p). Kosongkan = otomatis (resolusi asli).',
+                },
+                {
+                    name: 'Aturan file',
+                    value: 'Video ≤ 25MB dikirim sebagai file (bisa di-play langsung di Discord). Di atas 25MB dikirim tombol link download. Hasil HD di atas 25MB di-upload ke file hosting dan dikirim link HD-nya.',
+                },
+                {
+                    name: 'Platform',
+                    value: 'TikTok • Instagram • YouTube • X • Facebook • Reddit • Pinterest',
+                },
+            ],
+        };
+        return interaction.reply({ embeds: [helpEmbed], flags: MessageFlags.Ephemeral });
+    }
+
     const targetUrl = interaction.options.getString('link');
     const captionText = `<${targetUrl}>`;
 
