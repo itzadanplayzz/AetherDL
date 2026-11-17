@@ -29,6 +29,12 @@ const YTDLP = (() => {
     return 'yt-dlp';
 })();
 
+// Deno = JS runtime buat yt-dlp (tanpa ini, YouTube cuma ngasih format
+// video-only dan `best` gagal "Requested format is not available").
+// Hanya dipakai kalau bin/deno ada (di laptop user belum tentu ada).
+const DENO = path.join(__dirname, 'bin', 'deno');
+const jsRuntimeArgs = fs.existsSync(DENO) ? ['--js-runtimes', `deno:${DENO}`] : [];
+
 // Tombol link Discord maksimal 512 karakter — URL CDN (IG scontent /
 // googlevideo) sering 800+ karakter dan bikin crash 50035 kalau dipaksa
 // jadi tombol. Pakai URL sumber (pendek) sebagai fallback, atau tanpa tombol.
@@ -59,6 +65,57 @@ async function shortenUrl(longUrl) {
         } catch (e) {}
     }
     return null;
+}
+
+// Batas file Discord server ini: 10MB. Video resolusi asli di bawah itu
+// langsung dikirim sebagai file ke pesan; di atas itu kirim tombol link
+// (diperpendek) buat download lewat web.
+const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
+
+// Ukuran file dari URL remote (HEAD, fallback Range) — null kalau tidak bisa.
+async function getRemoteSize(url) {
+    try {
+        let res = await fetch(url, {
+            method: 'HEAD',
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(10000),
+        });
+        const len = res.headers.get('content-length');
+        if (len) return parseInt(len, 10);
+        res = await fetch(url, {
+            headers: { 'User-Agent': 'Mozilla/5.0', Range: 'bytes=0-0' },
+            signal: AbortSignal.timeout(10000),
+        });
+        const cr = res.headers.get('content-range');
+        if (cr) {
+            const total = cr.split('/')[1];
+            if (total) return parseInt(total, 10);
+        }
+    } catch (e) {}
+    return null;
+}
+
+// Kirim video resolusi asli dengan aturan yang sama di semua platform:
+// <= 10MB sebagai file langsung di pesan (+ tombol download),
+// > 10MB hanya tombol link (diperpendek) buat download lewat web.
+// `send` = fungsi kirim pesan, `cleanup` = hapus pesan loading / reply.
+async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
+    const size = await getRemoteSize(videoUrl);
+    const short = await shortenUrl(videoUrl);
+    const row = safeLinkRow('View / Download Link', short, sourceUrl);
+    const components = row ? [row] : [];
+    try {
+        if (size !== null && size > MAX_ATTACH_BYTES) {
+            await send({ content: captionText, components });
+        } else {
+            const attachment = new AttachmentBuilder(videoUrl, { name: 'video.mp4' });
+            await send({ content: captionText, files: [attachment], components });
+        }
+    } catch (err) {
+        // Gagal kirim file (mis. ternyata di atas batas) — fallback ke link
+        try { await send({ content: captionText, components }); } catch (e) {}
+    }
+    if (cleanup) { try { await cleanup(); } catch (e) {} }
 }
 
 const client = new Client({
@@ -221,7 +278,7 @@ async function getAudio(url) {
 function ytdlpGetUrl(url) {
     return new Promise((resolve) => {
         execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings',
-            '-f', 'best[ext=mp4]/best', '--get-url', url],
+            ...jsRuntimeArgs, '-f', 'best[ext=mp4]/best', '--get-url', url],
             { timeout: 60000, maxBuffer: 1024 * 1024 },
             (err, stdout) => {
                 if (err) return resolve(null);
@@ -234,7 +291,7 @@ function ytdlpGetUrl(url) {
 function ytdlpGetAudio(url, outPath) {
     return new Promise((resolve) => {
         execFile(YTDLP, ['--no-check-certificate', '--no-playlist', '--no-warnings',
-            '-f', 'bestaudio', '-x', '--audio-format', 'mp3', '-o', outPath, url],
+            ...jsRuntimeArgs, '-f', 'bestaudio', '-x', '--audio-format', 'mp3', '-o', outPath, url],
             { timeout: 120000 },
             (err) => {
                 resolve(!err && fs.existsSync(outPath));
@@ -319,16 +376,13 @@ client.on('messageCreate', async (message) => {
                         await loadingMsg.delete(); 
                     }
                 } else {
-                    const row = safeLinkRow('View / Download Link', result.url, targetUrl);
-
-                    try {
-                        const attachment = new AttachmentBuilder(result.url, { name: 'video.mp4' });
-                        await message.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
-                        await loadingMsg.delete(); 
-                    } catch (err) {
-                        await message.channel.send({ content: captionText });
-                        await loadingMsg.delete(); 
-                    }
+                    await sendVideo({
+                        captionText,
+                        videoUrl: result.url,
+                        sourceUrl: targetUrl,
+                        send: (msg) => message.channel.send(msg),
+                        cleanup: () => loadingMsg.delete(),
+                    });
                 }
             } else {
                 await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
@@ -336,18 +390,19 @@ client.on('messageCreate', async (message) => {
         } 
         
         // JIKA BUKAN TIKTOK (IG, YT, TWITTER, DLL) -> Engine 2 (yt-dlp).
-        // Pesan HANYA berisi link video aslinya (tanpa URL CDN yang panjang).
-        // Tombol "View / Download Link" = video resolusi asli (diperpendek
-        // dulu supaya muat 512 karakter) buat download lewat web, karena
-        // Discord membatasi file upload 10MB.
+        // Aturan sama seperti TikTok: resolusi asli, <= 10MB kirim file
+        // langsung ke pesan, > 10MB kirim tombol link buat download web.
         else {
             const result = await getMultiMedia(targetUrl, false);
 
             if (result.success) {
-                const short = await shortenUrl(result.url);
-                const row = safeLinkRow('View / Download Link', short, targetUrl);
-                await message.channel.send({ content: captionText, components: row ? [row] : [] });
-                await loadingMsg.delete();
+                await sendVideo({
+                    captionText,
+                    videoUrl: result.url,
+                    sourceUrl: targetUrl,
+                    send: (msg) => message.channel.send(msg),
+                    cleanup: () => loadingMsg.delete(),
+                });
             } else {
                 await loadingMsg.edit({ content: `❌ Gagal memproses media. Server down atau link tidak valid.\n${captionText}` });
             }
@@ -431,29 +486,28 @@ client.on('interactionCreate', async (interaction) => {
                         await interaction.deleteReply();
                     }
                 } else {
-                    const row = safeLinkRow('View / Download Link', result.url, targetUrl);
-
-                    try {
-                        const attachment = new AttachmentBuilder(result.url, { name: 'video.mp4' });
-                        await interaction.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
-                        await interaction.deleteReply();
-                    } catch (err) {
-                        await interaction.channel.send({ content: captionText });
-                        await interaction.deleteReply();
-                    }
+                    await sendVideo({
+                        captionText,
+                        videoUrl: result.url,
+                        sourceUrl: targetUrl,
+                        send: (msg) => interaction.channel.send(msg),
+                        cleanup: () => interaction.deleteReply(),
+                    });
                 }
             } else {
                 await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
             }
         } else {
-            // EKSEKUSI MULTI-MEDIA (IG, YT, DLL) — pesan hanya link aslinya,
-            // tombol = video resolusi asli (diperpendek) buat download web.
+            // EKSEKUSI MULTI-MEDIA (IG, YT, DLL) — aturan sama seperti TikTok.
             const result = await getMultiMedia(targetUrl, false);
             if (result.success) {
-                const short = await shortenUrl(result.url);
-                const row = safeLinkRow('View / Download Link', short, targetUrl);
-                await interaction.channel.send({ content: captionText, components: row ? [row] : [] });
-                await interaction.deleteReply();
+                await sendVideo({
+                    captionText,
+                    videoUrl: result.url,
+                    sourceUrl: targetUrl,
+                    send: (msg) => interaction.channel.send(msg),
+                    cleanup: () => interaction.deleteReply(),
+                });
             } else {
                 await interaction.editReply({ content: '❌ Gagal memproses media. Server down atau link tidak valid.' });
             }
