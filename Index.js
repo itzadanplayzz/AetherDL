@@ -473,6 +473,12 @@ async function handleMediaMessage(message) {
     if (handledMessageIds.has(message.id)) return false;
     handledMessageIds.add(message.id);
 
+    // PRIVASI: hapus pesan user LANGSUNG begitu link terbaca, sebelum
+    // orang lain sempat lihat siapa yang kirim link. Hasil tetap
+    // dikirim setelahnya; kalau gagal, link-nya tetap tampil di pesan
+    // error bot supaya bisa dicoba lagi.
+    try { await message.delete(); } catch (e) {}
+
     const captionText = `🔗 <${targetUrl}>`;
     const loadingMsg = await message.channel.send({ content: '⏳ Sedang memproses media... (Estimasi: 2-5 detik)' });
     const isTikTok = targetUrl.includes('tiktok.com');
@@ -535,13 +541,8 @@ async function handleMediaMessage(message) {
         }
     }
 
-    // Hapus pesan user HANYA setelah hasilnya sudah keluar & terlihat:
-    // beri jeda singkat supaya hasil (video/link) sempat tampil di layar
-    // dulu sebelum pesan perintahnya dihapus (privasi).
-    if (sent) {
-        await new Promise((r) => setTimeout(r, 1500));
-        try { await message.delete(); } catch (e) {}
-    }
+    // Pesan user sudah dihapus di awal (begitu link terbaca), jadi di sini
+    // tidak ada lagi yang perlu dihapus.
     return sent;
 }
 
