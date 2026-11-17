@@ -106,24 +106,49 @@ async function getRemoteSize(url) {
 // <= 25MB sebagai file langsung di pesan (+ tombol download),
 // > 25MB hanya tombol link (diperpendek) buat download lewat web.
 // `send` = fungsi kirim pesan, `cleanup` = hapus pesan loading / reply.
+// Logo + nama + warna platform asal link — ditampilkan di bagian ATAS
+// hasil (embed author), supaya kelihatan link ORI dari mana (logo IG,
+// TikTok, YouTube, X, dst). UI hasil tetap sama untuk semua platform,
+// yang beda cuma logo/nama/warna di atasnya. Logo diambil dari favicon
+// resmi tiap platform (Google favicon service, PNG).
+function getPlatformInfo(url) {
+    const u = (url || '').toLowerCase();
+    const fav = (domain) => `https://www.google.com/s2/favicons?domain=${domain}&sz=64`;
+    if (u.includes('tiktok.com')) return { name: 'TikTok', logo: fav('tiktok.com'), color: 0xFE2C55 };
+    if (u.includes('instagram.com')) return { name: 'Instagram', logo: fav('instagram.com'), color: 0xE1306C };
+    if (u.includes('youtube.com') || u.includes('youtu.be')) return { name: 'YouTube', logo: fav('youtube.com'), color: 0xFF0000 };
+    if (u.includes('x.com') || u.includes('twitter.com')) return { name: 'X', logo: fav('x.com'), color: 0xFFFFFF };
+    if (u.includes('facebook.com') || u.includes('fb.watch')) return { name: 'Facebook', logo: fav('facebook.com'), color: 0x1877F2 };
+    if (u.includes('reddit.com')) return { name: 'Reddit', logo: fav('reddit.com'), color: 0xFF4500 };
+    if (u.includes('pinterest.com')) return { name: 'Pinterest', logo: fav('pinterest.com'), color: 0xE60023 };
+    return { name: 'Video', logo: fav('discord.com'), color: 0x5865F2 };
+}
+
+// Embed header hasil: logo + nama platform di atas, link ORI di deskripsi.
+function platformEmbed(targetUrl, description) {
+    const p = getPlatformInfo(targetUrl);
+    return { author: { name: p.name, icon_url: p.logo }, description, color: p.color };
+}
+
 async function sendVideo({ captionText, videoUrl, sourceUrl, send, cleanup }) {
     const size = await getRemoteSize(videoUrl);
     const short = await shortenUrl(videoUrl);
     const row = safeLinkRow('View / Download Link', short, sourceUrl);
     const components = row ? [row] : [];
+    const embed = platformEmbed(sourceUrl, captionText);
     let ok = false;
     try {
         if (size !== null && size > MAX_ATTACH_BYTES) {
-            await send({ content: captionText, components });
+            await send({ embeds: [embed], components });
             ok = true;
         } else {
             const attachment = new AttachmentBuilder(videoUrl, { name: 'video.mp4' });
-            await send({ content: captionText, files: [attachment], components });
+            await send({ embeds: [embed], files: [attachment], components });
             ok = true;
         }
     } catch (err) {
         // Gagal kirim file (mis. ternyata di atas batas) — fallback ke link
-        try { await send({ content: captionText, components }); ok = true; } catch (e) {}
+        try { await send({ embeds: [embed], components }); ok = true; } catch (e) {}
     }
     if (cleanup) { try { await cleanup(); } catch (e) {} }
     return ok;
@@ -511,7 +536,7 @@ async function handleMediaMessage(message) {
                     try {
                         const renderData = await renderSingleTikTokSlide(result.urls[0], result.audioUrl, message.id);
                         const attachment = new AttachmentBuilder(renderData.outputPath, { name: 'slide_video.mp4' });
-                        await message.channel.send({ content: captionText, files: [attachment] });
+                        await message.channel.send({ embeds: [platformEmbed(targetUrl, captionText)], files: [attachment] });
                         stopTyping();
                         fs.rmSync(renderData.tempDir, { recursive: true, force: true });
                         sent = true;
@@ -523,7 +548,7 @@ async function handleMediaMessage(message) {
                     const attachments = result.urls.slice(0, 10).map((url, i) =>
                         new AttachmentBuilder(url, { name: `foto_${i + 1}.jpg` })
                     );
-                    await message.channel.send({ content: captionText, files: attachments });
+                    await message.channel.send({ embeds: [platformEmbed(targetUrl, captionText)], files: attachments });
                     stopTyping();
                     sent = true;
                 }
@@ -626,16 +651,16 @@ client.on('interactionCreate', async (interaction) => {
                 if (result.file) {
                     // Audio dari yt-dlp: file mp3 lokal, hapus folder temp sesudah kirim
                     const attachment = new AttachmentBuilder(result.file, { name: 'audio.mp3' });
-                    await interaction.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
+                    await interaction.channel.send({ embeds: [platformEmbed(targetUrl, captionText)], files: [attachment], components: row ? [row] : [] });
                     await interaction.deleteReply();
                     if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
                 } else {
                     const attachment = new AttachmentBuilder(result.url, { name: `${isTikTok ? (result.title || 'audio') : 'audio'}.mp3` });
-                    await interaction.channel.send({ content: captionText, files: [attachment], components: row ? [row] : [] });
+                    await interaction.channel.send({ embeds: [platformEmbed(targetUrl, captionText)], files: [attachment], components: row ? [row] : [] });
                     await interaction.deleteReply();
                 }
             } catch (err) {
-                await interaction.channel.send({ content: captionText });
+                await interaction.channel.send({ embeds: [platformEmbed(targetUrl, captionText)] });
                 await interaction.deleteReply();
                 if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
             }
@@ -657,7 +682,7 @@ client.on('interactionCreate', async (interaction) => {
                             const renderData = await renderSingleTikTokSlide(result.urls[0], result.audioUrl, interaction.id);
                             const attachment = new AttachmentBuilder(renderData.outputPath, { name: 'slide_video.mp4' });
 
-                            await interaction.channel.send({ content: captionText, files: [attachment] });
+                            await interaction.channel.send({ embeds: [platformEmbed(targetUrl, captionText)], files: [attachment] });
                             await interaction.deleteReply(); 
                             fs.rmSync(renderData.tempDir, { recursive: true, force: true });
                         } catch (renderErr) {
@@ -667,7 +692,7 @@ client.on('interactionCreate', async (interaction) => {
                         const attachments = result.urls.slice(0, 10).map((url, i) => 
                             new AttachmentBuilder(url, { name: `foto_${i + 1}.jpg` })
                         );
-                        await interaction.channel.send({ content: captionText, files: attachments });
+                        await interaction.channel.send({ embeds: [platformEmbed(targetUrl, captionText)], files: attachments });
                         await interaction.deleteReply();
                     }
                 } else {
@@ -693,7 +718,7 @@ client.on('interactionCreate', async (interaction) => {
                 if (merged && merged.file) {
                     const row = safeLinkRow('View / Download Link', targetUrl);
                     const attachment = new AttachmentBuilder(merged.file, { name: 'video.mp4' });
-                    await interaction.channel.send({ content: `${captionText}\n📹 Resolusi ${resolusi}p`, files: [attachment], components: row ? [row] : [] });
+                    await interaction.channel.send({ embeds: [platformEmbed(targetUrl, `${captionText}\n📹 Resolusi ${resolusi}p`)], files: [attachment], components: row ? [row] : [] });
                     await interaction.deleteReply();
                     fs.rmSync(merged.tempDir, { recursive: true, force: true });
                 } else {
@@ -710,7 +735,7 @@ client.on('interactionCreate', async (interaction) => {
                     if (hostUrl) {
                         const row = safeLinkRow('View / Download Link', hostUrl, targetUrl);
                         const sizeMB = (hosted.size / 1048576).toFixed(0);
-                        await interaction.channel.send({ content: `${captionText}\n📹 Resolusi ${resolusi}p • ${sizeMB}MB\n⬇️ Download HD: ${hostUrl}`, components: row ? [row] : [] });
+                        await interaction.channel.send({ embeds: [platformEmbed(targetUrl, `${captionText}\n📹 Resolusi ${resolusi}p • ${sizeMB}MB\n⬇️ Download HD: ${hostUrl}`)], components: row ? [row] : [] });
                         try { await interaction.deleteReply(); } catch (e) {}
                     } else {
                         // Upload gagal / hasil di atas batas host — fallback ke link biasa.
