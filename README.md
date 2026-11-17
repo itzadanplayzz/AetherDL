@@ -2,6 +2,11 @@
 
 # AetherDL
 
+![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)
+![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)
+![discord.js](https://img.shields.io/badge/discord.js-14.28.1-blue.svg)
+![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?logo=javascript&logoColor=black)
+
 Bot Discord untuk download video dari TikTok, Instagram, YouTube, X, Facebook, dan lainnya. Paste link di chat atau pakai slash command — video langsung dikirim ke Discord.
 
 ## Fitur
