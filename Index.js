@@ -492,7 +492,7 @@ async function uploadToHost(filePath) {
 client.once('clientReady', async () => {
     console.log(`🤖 Bot Multi-Downloader Online: ${client.user.tag}`);
     client.user.setPresence({
-        activities: [{ name: '/use /usemp3 (TikTok, IG, YT, X) ✨', type: ActivityType.Custom }],
+        activities: [{ name: '/use & /help🌟', type: ActivityType.Custom }],
         status: 'online',
     });
     await registerCommands();
