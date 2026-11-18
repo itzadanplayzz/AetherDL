@@ -178,24 +178,39 @@ client.on('shardDisconnect', (event, shardId) => console.log(`Shard ${shardId} d
 // WebSocket, coba reconnect gateway (destroy + login ulang); kalau error lain,
 // keluar supaya keepalive restart.
 let wsReconnecting = false;
+let wsReconnectAttempts = 0;
 process.on('uncaughtException', (err) => {
     const msg = String((err && err.message) || err);
     console.error('uncaughtException:', msg);
     const isWs = /websocket|handshake|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up/i.test(msg);
-    if (!isWs || wsReconnecting) { process.exit(1); return; }
+    // Bukan error WebSocket (bug di code) -> mati saja, biar keepalive restart.
+    if (!isWs) { process.exit(1); return; }
+    // Sudah ada reconnect yang jalan -> abaikan, jangan exit.
+    // (Sebelumnya: error WS kedua saat reconnect langsung process.exit(1),
+    // dan reconnect yang gagal sekali juga langsung exit — itu yang bikin
+    // bot mati berulang. Sekarang reconnect diulang dengan backoff sampai bisa.)
+    if (wsReconnecting) return;
     wsReconnecting = true;
-    console.log('WebSocket gateway error — mencoba reconnect dalam 5 detik...');
-    setTimeout(async () => {
+    wsReconnectAttempts = 0;
+    const tryReconnect = async () => {
+        wsReconnectAttempts++;
+        // Backoff: 5s, 10s, 20s, 30s, 30s, ... (maks 30 detik).
+        const delay = Math.min(5000 * Math.pow(2, wsReconnectAttempts - 1), 30000);
+        console.log(`WebSocket gateway error — mencoba reconnect #${wsReconnectAttempts} dalam ${delay / 1000} detik...`);
+        await new Promise(r => setTimeout(r, delay));
         try { await client.destroy(); } catch (e) {}
         try {
             await client.login(BOT_TOKEN);
             wsReconnecting = false;
+            wsReconnectAttempts = 0;
             console.log('Reconnect gateway berhasil.');
         } catch (e) {
-            console.error('Reconnect gateway gagal:', e.message);
-            process.exit(1);
+            console.error('Reconnect gateway gagal:', e.message, '— coba lagi.');
+            // Jangan exit; coba lagi sampai gateway bisa dijangkau.
+            tryReconnect();
         }
-    }, 5000);
+    };
+    tryReconnect();
 });
 
 // Update deskripsi command agar user tahu ini support banyak platform
